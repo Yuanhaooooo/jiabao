@@ -1,0 +1,9 @@
+
+{
+  "name": "Luxury Tech Interactive Birthday Celebration",
+  "description": "A high-fidelity 3D interactive birthday experience featuring a futuristic cake, cinematic bloom effects, and AI-powered personalized greetings.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
