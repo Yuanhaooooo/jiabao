@@ -1,43 +1,20 @@
-import React, { useState, useRef, useEffect } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-
-const supabase =
-  SUPABASE_URL && SUPABASE_ANON_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-    : null;
+// components/VoiceArchive.tsx
+import React, { useEffect, useRef, useState } from "react";
+import { supabase } from "../supabaseClient";
 
 const BUCKET = "voice-archive";
+const TABLE = "voice_messages";
 
 interface VoiceMessage {
   id: string;
-  url: string; // 播放用
+  url: string;
   duration: number;
   timestamp: number;
   node: string;
-  file_path?: string; // Supabase Storage path
+  file_path?: string;
 }
 
-function genId() {
-  return "MSG-" + Math.random().toString(36).slice(2, 8).toUpperCase();
-}
-
-async function getPlayableUrl(filePath: string): Promise<string> {
-  if (!supabase) throw new Error("Supabase not configured");
-
-  // ✅ 如果 bucket 是 Public，直接用 public url
-  const pub = supabase.storage.from(BUCKET).getPublicUrl(filePath);
-  if (pub?.data?.publicUrl) return pub.data.publicUrl;
-
-  // ✅ 如果 bucket 是 Private，走 signed url
-  const signed = await supabase.storage.from(BUCKET).createSignedUrl(filePath, 60 * 60);
-  if (signed.error || !signed.data?.signedUrl) {
-    throw signed.error ?? new Error("Failed to create signed url");
-  }
-  return signed.data.signedUrl;
-}
+type SyncStatus = "IDLE" | "SYNCING" | "ERROR";
 
 const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
   isOpen,
@@ -48,7 +25,7 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
   const [recordingTime, setRecordingTime] = useState(0);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [vocalLevel, setVocalLevel] = useState(0);
-  const [syncStatus, setSyncStatus] = useState<"IDLE" | "SYNCING" | "ERROR">("IDLE");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("IDLE");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -56,167 +33,234 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
-  // ============ 拉取云端列表 ============
+  // 用于关闭时清理音频/流
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  // ---------- 工具：生成一个短 ID ----------
+  const genId = () =>
+    "MSG-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+
+  // ---------- 工具：把 Storage 路径变成可播放 URL ----------
+  // 你 bucket 设为 Public 时：getPublicUrl 即可
+  // 若你之后改成 Private，需要改成 createSignedUrl（我也给了注释版本）
+  const toPlayableUrl = (filePath: string) => {
+    const { data } = supabase.storage.from(BUCKET).getPublicUrl(filePath);
+    return data.publicUrl;
+  };
+
+  // ---------- 拉取消息列表 ----------
+  const loadMessages = async () => {
+    setSyncStatus("SYNCING");
+    try {
+      const { data, error } = await supabase
+        .from(TABLE)
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) throw error;
+
+      const list: VoiceMessage[] = (data ?? []).map((row: any) => {
+        const url = toPlayableUrl(row.file_path);
+        return {
+          id: row.id,
+          url,
+          duration: row.duration,
+          timestamp: new Date(row.created_at).getTime(),
+          node: row.node ?? "NODE-0",
+          file_path: row.file_path,
+        };
+      });
+
+      setMessages(list);
+      setSyncStatus("IDLE");
+    } catch (err) {
+      console.error("Load messages failed:", err);
+      setSyncStatus("ERROR");
+    }
+  };
+
+  // 打开面板时加载 + 轮询刷新
   useEffect(() => {
     if (!isOpen) return;
 
-    let interval: number | null = null;
-
-    const loadMessages = async () => {
-      setSyncStatus("SYNCING");
-      try {
-        if (!supabase) {
-          // 没配置 supabase 的情况下，给你一个明显提示
-          setMessages([]);
-          setSyncStatus("ERROR");
-          return;
-        }
-
-        const { data, error } = await supabase
-          .from("voice_messages")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(50);
-
-        if (error) throw error;
-
-        const withUrls: VoiceMessage[] = await Promise.all(
-          (data ?? []).map(async (row: any) => {
-            const url = await getPlayableUrl(row.file_path);
-            return {
-              id: row.id,
-              file_path: row.file_path,
-              url,
-              duration: row.duration,
-              timestamp: new Date(row.created_at).getTime(),
-              node: row.node,
-            };
-          })
-        );
-
-        setMessages(withUrls);
-        setSyncStatus("IDLE");
-      } catch (err) {
-        console.error("Sync failed:", err);
-        setSyncStatus("ERROR");
-      }
-    };
-
     loadMessages();
-    interval = window.setInterval(loadMessages, 15000);
+    const interval = window.setInterval(loadMessages, 15000);
 
     return () => {
-      if (interval) window.clearInterval(interval);
+      window.clearInterval(interval);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
-  // ============ 录音 ============
+  // ---------- 开始录音 ----------
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
 
       const audioCtx = new AudioContext();
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyzer = audioCtx.createAnalyser();
-      source.connect(analyzer);
+      audioCtxRef.current = audioCtx;
 
-      const update = () => {
-        const data = new Uint8Array(analyzer.frequencyBinCount);
-        analyzer.getByteFrequencyData(data);
-        setVocalLevel(data.reduce((a, b) => a + b, 0) / data.length);
-        animationFrameRef.current = requestAnimationFrame(update);
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+
+      const updateMeter = () => {
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((a, b) => a + b, 0) / data.length;
+        setVocalLevel(avg);
+        animationFrameRef.current = requestAnimationFrame(updateMeter);
       };
-      update();
+      updateMeter();
 
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
-      mediaRecorder.ondataavailable = (e) => audioChunksRef.current.push(e.data);
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
 
       mediaRecorder.onstop = async () => {
+        // 1) 组装 blob
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+
+        // 2) 生成消息元数据
+        const id = genId();
+        const node = "NODE-" + Math.floor(Math.random() * 999);
+        const duration = recordingTime;
+        const timestamp = Date.now();
+
+        // 3) 上传 + 写库
+        setSyncStatus("SYNCING");
+
         try {
-          const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+          // 建议统一路径，方便后续管理
+          const filePath = `public/${id}.webm`;
 
-          const id = genId();
-          const node = "NODE-" + Math.floor(Math.random() * 999);
-          const duration = recordingTime;
-          const ts = Date.now();
+          // 3.1 上传到 Storage
+          const { error: uploadErr } = await supabase.storage
+            .from(BUCKET)
+            .upload(filePath, blob, {
+              contentType: "audio/webm",
+              upsert: true,
+            });
 
-          if (!supabase) throw new Error("Supabase not configured");
+          if (uploadErr) throw uploadErr;
 
-          setSyncStatus("SYNCING");
-
-          // 1) 上传到 Storage
-          const filePath = `zjb/${ts}-${id}.webm`;
-          const up = await supabase.storage.from(BUCKET).upload(filePath, blob, {
-            contentType: "audio/webm",
-            upsert: false,
-          });
-          if (up.error) throw up.error;
-
-          // 2) 写入 DB 元数据
-          const ins = await supabase.from("voice_messages").insert({
+          // 3.2 写入数据库（元数据）
+          const { error: dbErr } = await supabase.from(TABLE).insert({
             id,
             file_path: filePath,
             duration,
             node,
           });
-          if (ins.error) throw ins.error;
 
-          // 3) 本地立刻可播放
-          const url = await getPlayableUrl(filePath);
-          const newMessage: VoiceMessage = {
+          if (dbErr) throw dbErr;
+
+          // 3.3 更新前端列表（用 public url）
+          const url = toPlayableUrl(filePath);
+          const newMsg: VoiceMessage = {
             id,
-            file_path: filePath,
             url,
             duration,
-            timestamp: ts,
+            timestamp,
             node,
+            file_path: filePath,
           };
 
-          setMessages((p) => [newMessage, ...p]);
+          setMessages((p) => [newMsg, ...p]);
           setRecordingTime(0);
           setSyncStatus("IDLE");
         } catch (err) {
-          console.error("Upload failed:", err);
+          console.error("Upload/Insert failed:", err);
           setSyncStatus("ERROR");
         } finally {
+          // 关闭硬件资源
           stream.getTracks().forEach((t) => t.stop());
-          audioCtx.close();
+          audioCtx.close().catch(() => {});
+          streamRef.current = null;
+          audioCtxRef.current = null;
         }
       };
 
+      // 开始
       mediaRecorder.start();
       setIsRecording(true);
-      timerIntervalRef.current = window.setInterval(() => setRecordingTime((p) => p + 1), 1000);
+      timerIntervalRef.current = window.setInterval(
+        () => setRecordingTime((p) => p + 1),
+        1000
+      );
     } catch (err) {
       console.error("Recording failed:", err);
       setSyncStatus("ERROR");
     }
   };
 
+  // ---------- 停止录音 ----------
   const stopRecording = () => {
     mediaRecorderRef.current?.stop();
     setIsRecording(false);
-    if (timerIntervalRef.current) window.clearInterval(timerIntervalRef.current);
-    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+
+    if (timerIntervalRef.current) {
+      window.clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
   };
 
-  // ============ 播放 ============
+  // ---------- 播放 ----------
   const playMessage = (msg: VoiceMessage) => {
+    if (!audioPlayerRef.current) return;
+
     if (playingId === msg.id) {
-      audioPlayerRef.current?.pause();
+      audioPlayerRef.current.pause();
       setPlayingId(null);
       return;
     }
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.src = msg.url;
-      audioPlayerRef.current.play();
-      setPlayingId(msg.id);
-      audioPlayerRef.current.onended = () => setPlayingId(null);
-    }
+
+    audioPlayerRef.current.src = msg.url;
+    audioPlayerRef.current.play().catch((e) => console.error("Play failed:", e));
+    setPlayingId(msg.id);
+
+    audioPlayerRef.current.onended = () => setPlayingId(null);
   };
+
+  // 关闭面板时清理
+  useEffect(() => {
+    if (isOpen) return;
+
+    // stop recording if user closes panel while recording
+    if (isRecording) {
+      try {
+        stopRecording();
+      } catch {}
+    }
+
+    // stop playing
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.src = "";
+    }
+    setPlayingId(null);
+
+    // release mic
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen) return null;
 
@@ -241,23 +285,35 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
               {syncStatus === "SYNCING"
                 ? "同步云端中..."
                 : syncStatus === "ERROR"
-                ? "同步连接失败 / 未配置Supabase"
+                ? "同步连接失败"
                 : "云端已就绪"}
             </span>
           </div>
         </div>
-        <button
-          onClick={onClose}
-          className="text-yellow-500/40 hover:text-yellow-500 text-[10px] transition-colors"
-        >
-          [关闭终端]
-        </button>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={loadMessages}
+            className="text-yellow-500/40 hover:text-yellow-500 text-[10px] transition-colors"
+            title="刷新"
+          >
+            [刷新]
+          </button>
+          <button
+            onClick={onClose}
+            className="text-yellow-500/40 hover:text-yellow-500 text-[10px] transition-colors"
+          >
+            [关闭终端]
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-4 pr-2 mb-6 scrollbar-thin scrollbar-thumb-yellow-500/20">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center opacity-20 italic">
-            <p className="text-[9px] text-white tracking-widest">暂无云端存档数据</p>
+            <p className="text-[9px] text-white tracking-widest">
+              暂无云端存档数据
+            </p>
           </div>
         ) : (
           messages.map((msg) => (
@@ -276,11 +332,14 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
                 </span>
                 <span>{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
+
               <div className="flex items-center justify-between">
                 <button
                   onClick={() => playMessage(msg)}
                   className={`flex-1 py-2.5 border border-yellow-500/30 text-yellow-500 text-[9px] uppercase transition-all flex items-center justify-center gap-2 ${
-                    playingId === msg.id ? "bg-yellow-500/20" : "hover:border-yellow-500/60"
+                    playingId === msg.id
+                      ? "bg-yellow-500/20"
+                      : "hover:border-yellow-500/60"
                   }`}
                 >
                   {playingId === msg.id ? (
@@ -294,16 +353,26 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
                     </>
                   ) : (
                     <>
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                      <svg
+                        width="10"
+                        height="10"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                      >
                         <path d="M8 5v14l11-7z" />
                       </svg>
                       提取声纹存档
                     </>
                   )}
                 </button>
+
                 <div className="ml-4 text-right">
-                  <div className="text-white text-[10px] font-mono leading-none">{msg.duration}S</div>
-                  <div className="text-white/20 text-[6px] font-mono mt-1">{msg.node}</div>
+                  <div className="text-white text-[10px] font-mono leading-none">
+                    {msg.duration}S
+                  </div>
+                  <div className="text-white/20 text-[6px] font-mono mt-1">
+                    {msg.node}
+                  </div>
                 </div>
               </div>
             </div>
@@ -316,7 +385,9 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
           <p className="text-[10px] text-yellow-500 font-mono font-bold tracking-widest">
             {isRecording ? `REC_LIVE: ${recordingTime}S` : "采集新的全域留言"}
           </p>
-          <p className="text-[7px] text-white/20 uppercase">声音将上传至拾七核心存档库</p>
+          <p className="text-[7px] text-white/20 uppercase">
+            声音将上传至拾七核心存档库
+          </p>
         </div>
 
         <button
@@ -332,7 +403,9 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
           )}
           <div
             className={`transition-all duration-500 ${
-              isRecording ? "w-8 h-8 rounded-sm bg-red-600" : "w-10 h-10 rounded-full bg-yellow-500"
+              isRecording
+                ? "w-8 h-8 rounded-sm bg-red-600"
+                : "w-10 h-10 rounded-full bg-yellow-500"
             }`}
             style={{ transform: isRecording ? `scale(${1 + vocalLevel / 80})` : "none" }}
           ></div>
@@ -340,8 +413,8 @@ const VoiceArchive: React.FC<{ isOpen: boolean; onClose: () => void }> = ({
 
         <div className="w-full flex justify-between px-2 mt-2 opacity-30 text-[6px] text-white font-mono uppercase">
           <span>Lat: 24ms</span>
-          <span>Prot: WebRTC/SSL</span>
-          <span>Enc: WEBM</span>
+          <span>Prot: HTTPS</span>
+          <span>Enc: OPUS_64</span>
         </div>
       </div>
 
