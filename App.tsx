@@ -184,9 +184,12 @@ const App: React.FC = () => {
   const fsmTimerRef = useRef<number>(0);
   const lastStateTimeRef = useRef<number>(Date.now());
 
-  // 吹气增强：防抖 + 冷却（不影响UI）
+  // 吹气增强：防抖 + 冷却
   const blowHitFramesRef = useRef<number>(0);
   const lastTriggerAtRef = useRef<number>(0);
+
+  // ✅ 专门记录进入点蜡烛阶段的时间（修复“第二次被锁死/被刷新”的根因）
+  const candlesEnteredAtRef = useRef<number>(0);
 
   const DURATIONS: Record<string, number> = {
     COUNTDOWN: 3000,
@@ -204,7 +207,6 @@ const App: React.FC = () => {
   // ✅ 兼容电脑/手机的麦克风初始化（优先关闭处理，失败回退）
   const initMic = async () => {
     try {
-      // 先尝试“手机友好”配置；失败则回退到默认（电脑更稳）
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -233,16 +235,15 @@ const App: React.FC = () => {
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
 
-      // 既保留你原来电脑可用的“频域平均”，也增强吹气识别
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.65;
 
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // 重置防抖/冷却
       blowHitFramesRef.current = 0;
       lastTriggerAtRef.current = 0;
+      candlesEnteredAtRef.current = 0;
 
       setMicActive(true);
       setState('LISTENING');
@@ -259,13 +260,17 @@ const App: React.FC = () => {
       const elapsed = now - lastStateTimeRef.current;
       const duration = DURATIONS[state] || 0;
 
+      // --- 状态机自动推进 ---
       if (duration !== Infinity && elapsed > duration) {
-        if (state === 'COUNTDOWN') setState('MORPH_CAKE');
-else if (state === 'MORPH_CAKE') {
-  setState('CANDLES_LIT');
-  lastTriggerAtRef.current = now; // ✅ 进入点蜡烛后给 350ms 冷却保护
-}
-        else if (state === 'BLOW_OUT') setState('GIFT_OPEN');
+        if (state === 'COUNTDOWN') {
+          setState('MORPH_CAKE');
+        } else if (state === 'MORPH_CAKE') {
+          setState('CANDLES_LIT');
+          candlesEnteredAtRef.current = now; // ✅ 记录进入点蜡烛的时刻
+          lastTriggerAtRef.current = now;    // ✅ 进入点蜡烛后先冷却
+        } else if (state === 'BLOW_OUT') {
+          setState('GIFT_OPEN');
+        }
 
         lastStateTimeRef.current = now;
         setProgress(0);
@@ -276,51 +281,58 @@ else if (state === 'MORPH_CAKE') {
         }
       }
 
-      // ✅ 吹气检测：保留电脑原逻辑 + 增强手机识别
+      // --- 吹气检测 ---
       if (analyserRef.current && micActive) {
         const analyser = analyserRef.current;
 
-        // --- 频域（你的原逻辑核心）---
+        // 频域
         const freq = new Uint8Array(analyser.frequencyBinCount);
         analyser.getByteFrequencyData(freq);
-
         const average = freq.reduce((a, b) => a + b, 0) / freq.length;
 
-        // --- 低频增强（手机吹气常见）---
+        // 低频（吹气常见）
         const lowBins = Math.min(15, freq.length);
         const lowAvg = freq.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
 
-        // --- 时域 RMS（有些设备“吹气”更像瞬态/宽带）---
+        // 时域 RMS
         const time = new Uint8Array(analyser.fftSize);
         analyser.getByteTimeDomainData(time);
-
         let sumSq = 0;
         for (let i = 0; i < time.length; i++) {
           const v = (time[i] - 128) / 128;
           sumSq += v * v;
         }
-        const rms = Math.sqrt(sumSq / time.length); // 0~1
+        const rms = Math.sqrt(sumSq / time.length);
 
-        // 设备粗略判断（手机一般 pointer:coarse）
         const isPhoneLike = window.matchMedia?.('(pointer:coarse)')?.matches ?? false;
 
+        // ✅ 二次吹气保护：点蜡烛出现后至少停留 900ms 才允许触发第二次
+        const secondStageArmed =
+          state !== 'CANDLES_LIT' || (now - candlesEnteredAtRef.current > 900);
 
+        // ✅ 电脑第一次吹气保留“平均频域”触发（只在 LISTENING 使用）
+        const desktopLegacyHit = state === 'LISTENING' && average > 75;
 
-// ✅ 只把“average > 75”用于第一次吹气（LISTENING）
-// 否则会在 CANDLES_LIT 被环境噪声直接跳到 BLOW_OUT
-const desktopLegacyHit = state === 'LISTENING' && average > 75;
+        // 手机阈值更低一点，避免吹不动
+        const rmsHit = rms > (isPhoneLike ? 0.02 : 0.04);
+        const lowHit = lowAvg > (isPhoneLike ? 40 : 60);
 
-const rmsHit = rms > (isPhoneLike ? 0.03 : 0.04);
-const lowHit = lowAvg > (isPhoneLike ? 50 : 60);
-const avgHit = state === 'LISTENING'
-  ? average > (isPhoneLike ? 55 : 65)
-  : average > (isPhoneLike ? 65 : 75);
+        // avgHit 仅作为第一次辅助，第二次不用它（避免噪声误触发）
+        const avgHit =
+          state === 'LISTENING'
+            ? average > (isPhoneLike ? 55 : 65)
+            : average > (isPhoneLike ? 65 : 75);
 
-const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
+        // LISTENING：放宽（兼容电脑）
+        // CANDLES_LIT：收紧（必须像吹气：低频/瞬态），并且要 armed
+        const hit =
+          state === 'LISTENING'
+            ? (desktopLegacyHit || rmsHit || lowHit || avgHit)
+            : (secondStageArmed && (rmsHit || lowHit));
 
-        // 防抖 + 冷却：电脑保持“几乎立即”，手机也容易触发
+        // 防抖 + 冷却：第二次冷却更长，避免瞬间误触发
         const requiredFrames = desktopLegacyHit ? 1 : isPhoneLike ? 2 : 2;
-        const cooldownMs = 350;
+        const cooldownMs = state === 'CANDLES_LIT' ? 900 : 350;
 
         if (hit) blowHitFramesRef.current += 1;
         else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
@@ -356,20 +368,16 @@ const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
       author: 'LOCAL_FALLBACK',
     };
 
-    // 1) 先读缓存
     const cached = localStorage.getItem(GREETING_CACHE_KEY);
     if (cached) {
       try {
         const parsed = JSON.parse(cached);
-
-        // ✅ 校验结构
         if (parsed && typeof parsed.message === 'string' && typeof parsed.author === 'string') {
           setGreeting(parsed);
         } else {
           localStorage.removeItem(GREETING_CACHE_KEY);
           setGreeting(fallback);
         }
-
         initMic();
         return;
       } catch {
@@ -380,17 +388,14 @@ const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
       }
     }
 
-    // 2) 没缓存 → 调 Gemini 一次
     try {
       const result = await generateLuxuryGreeting(subjectName);
-
       if (result && typeof result.message === 'string' && typeof result.author === 'string') {
         setGreeting(result);
         localStorage.setItem(GREETING_CACHE_KEY, JSON.stringify(result));
       } else {
         setGreeting(fallback);
       }
-
       initMic();
     } catch (e) {
       console.error('AI greeting failed:', e);
