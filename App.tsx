@@ -304,8 +304,7 @@ else if (state === 'MORPH_CAKE') {
         // 设备粗略判断（手机一般 pointer:coarse）
         const isPhoneLike = window.matchMedia?.('(pointer:coarse)')?.matches ?? false;
 
-        // ✅ 关键：保留你原本“电脑可用”的触发方式（不让电脑变难）
-        const desktopLegacyHit = average > 75;
+
 
 // ✅ 只把“average > 75”用于第一次吹气（LISTENING）
 // 否则会在 CANDLES_LIT 被环境噪声直接跳到 BLOW_OUT
@@ -313,7 +312,9 @@ const desktopLegacyHit = state === 'LISTENING' && average > 75;
 
 const rmsHit = rms > (isPhoneLike ? 0.03 : 0.04);
 const lowHit = lowAvg > (isPhoneLike ? 50 : 60);
-const avgHit = average > (isPhoneLike ? 55 : 65);
+const avgHit = state === 'LISTENING'
+  ? average > (isPhoneLike ? 55 : 65)
+  : average > (isPhoneLike ? 65 : 75);
 
 const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
 
@@ -430,7 +431,7 @@ const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
         <OrbitControls
           enablePan={false}
           enableZoom={false}
-          autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GREETING' || state === 'GIFT_OPEN'}
+          autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GIFT_OPEN'}
           autoRotateSpeed={0.35}
         />
 
