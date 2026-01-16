@@ -236,38 +236,53 @@ const App: React.FC = () => {
   }, [state, micActive]);
 
 const handleInitialize = async () => {
-  // 1️⃣ 先查本地缓存
-  const cached = localStorage.getItem(GREETING_CACHE_KEY);
+  const fallback: GreetingData = {
+    message: "（AI 核心暂时离线）愿你仍能在星尘中保持平和与勇气。生日快乐。",
+    author: "LOCAL_FALLBACK",
+  };
 
+  // 1) 先读缓存
+  const cached = localStorage.getItem(GREETING_CACHE_KEY);
   if (cached) {
-    // 已经生成过，直接使用
     try {
       const parsed = JSON.parse(cached);
-      setGreeting(parsed);
+
+      // ✅ 关键：校验结构
+      if (parsed && typeof parsed.message === "string" && typeof parsed.author === "string") {
+        setGreeting(parsed);
+      } else {
+        // 缓存结构不对 → 清掉
+        localStorage.removeItem(GREETING_CACHE_KEY);
+        setGreeting(fallback);
+      }
+
       initMic();
       return;
     } catch {
-      // 如果缓存损坏，清掉重新生成
       localStorage.removeItem(GREETING_CACHE_KEY);
+      setGreeting(fallback);
+      initMic();
+      return;
     }
   }
 
-  // 2️⃣ 没缓存，才调用 Gemini（只会发生一次）
+  // 2) 没缓存 → 调 Gemini 一次
   try {
     const result = await generateLuxuryGreeting(subjectName);
 
-    setGreeting(result);
-
-    // 3️⃣ 写入缓存
-    localStorage.setItem(
-      GREETING_CACHE_KEY,
-      JSON.stringify(result)
-    );
+    // ✅ 同样校验一下
+    if (result && typeof result.message === "string" && typeof result.author === "string") {
+      setGreeting(result);
+      localStorage.setItem(GREETING_CACHE_KEY, JSON.stringify(result));
+    } else {
+      setGreeting(fallback);
+    }
 
     initMic();
   } catch (e) {
     console.error("AI greeting failed:", e);
-    // 即使 AI 挂了，也不要阻塞仪式
+    // ✅ 失败也给一个祝辞，保证 UI 一定显示
+    setGreeting(fallback);
     initMic();
   }
 };
@@ -279,7 +294,7 @@ const handleInitialize = async () => {
 情绪噪声保持在低频区间。
 在宇宙持续展开的过程中，
 你始终处于努力的同步运动拓展状态。
-17岁生日已到达。愿你一切运行良好。`;
+17岁生日时间轴已到达。愿一切运行良好。`;
 
   return (
     <div className="relative w-full h-screen bg-[#020202] overflow-hidden select-none font-pixel">
