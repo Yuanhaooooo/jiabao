@@ -194,9 +194,31 @@ const App: React.FC = () => {
   const fsmTimerRef = useRef<number>(0);
   const lastStateTimeRef = useRef<number>(Date.now());
 
-  // ✅ 吹气加强：连续帧 + 冷却（防误触）
+  // ====== 音频相关（新增）======
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // 吹气检测用的自适应噪声地板
+  const rmsFloorRef = useRef<number>(0);
+  const avgFloorRef = useRef<number>(0);
+
+  // 连续帧 & 冷却
   const blowHitFramesRef = useRef<number>(0);
   const lastTriggerAtRef = useRef<number>(0);
+
+  // 调试 HUD 用
+  const [debugAudio, setDebugAudio] = useState<{
+    rms: number;
+    avg: number;
+    low: number;
+    ctx: string;
+  }>({
+    rms: 0,
+    avg: 0,
+    low: 0,
+    ctx: 'n/a',
+  });
+
 
   const DURATIONS: Record<string, number> = {
     COUNTDOWN: 3000,
@@ -211,44 +233,55 @@ const App: React.FC = () => {
     window.setTimeout(() => setShowFlash(false), 150);
   };
 
-  // ✅ 新的麦克风初始化（手机更稳）
-  const initMic = async () => {
+ const initMic = async () => {
+  try {
+    // 兼容手机：尽量关掉处理；但如果失败，自动回退到默认 true
+    let stream: MediaStream;
     try {
-      const constraints: MediaStreamConstraints = {
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
         } as any,
         video: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      if (audioCtx.state === 'suspended') {
-        try {
-          await audioCtx.resume();
-        } catch {}
-      }
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.65;
-
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      setMicActive(true);
-      setState('LISTENING');
-    } catch (err) {
-      console.warn('Mic access error, proceeding without mic', err);
-      setMicActive(false);
-      setState('LISTENING');
+      });
+    } catch {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     }
-  };
+
+    streamRef.current = stream;
+
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    audioCtxRef.current = audioCtx;
+
+    // 手机/部分浏览器：必须 resume
+    if (audioCtx.state === "suspended") {
+      try { await audioCtx.resume(); } catch {}
+    }
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+
+    analyser.fftSize = 1024;              // 更稳的时域 RMS（别用太小）
+    analyser.smoothingTimeConstant = 0.6;
+
+    source.connect(analyser);
+    analyserRef.current = analyser;
+
+    // 重置地板
+    rmsFloorRef.current = 0;
+    avgFloorRef.current = 0;
+
+    setMicActive(true);
+    setState("LISTENING");
+  } catch (err) {
+    console.warn("Mic access error:", err);
+    setMicActive(false);
+    setState("LISTENING");
+  }
+};
+
 
   useEffect(() => {
     const update = () => {
@@ -270,41 +303,80 @@ const App: React.FC = () => {
         setProgress(Math.min(elapsed / duration, 1));
       }
 
-      // ✅ 新的吹气检测（低频加权 + 防抖 + 冷却）
-      if (analyserRef.current && micActive) {
-        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-        analyserRef.current.getByteFrequencyData(dataArray);
+if (analyserRef.current && micActive) {
+  const analyser = analyserRef.current;
 
-        const lowBins = 15;
-        const lowFreqAvg = dataArray.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
-        const totalAvg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+  // --- 频域（辅助） ---
+  const freq = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(freq);
 
-        const blowThreshold = 55; // 手机建议 45~60
-        const isHit = lowFreqAvg > blowThreshold || totalAvg > blowThreshold;
+  const lowBins = Math.min(15, freq.length);
+  const lowAvg = freq.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
+  const avg = freq.reduce((a, b) => a + b, 0) / freq.length;
 
-        if (isHit) blowHitFramesRef.current += 1;
-        else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
+  // --- 时域 RMS（核心：吹气/拍麦/气流更容易触发） ---
+  const time = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(time);
 
-        const requiredFrames = 6;
-        const cooldownMs = 900;
+  let sumSq = 0;
+  for (let i = 0; i < time.length; i++) {
+    const v = (time[i] - 128) / 128;
+    sumSq += v * v;
+  }
+  const rms = Math.sqrt(sumSq / time.length); // 0~1
 
-        const canTrigger = now - lastTriggerAtRef.current > cooldownMs;
-        const shouldTrigger = blowHitFramesRef.current >= requiredFrames;
+  // --- 自适应地板（只在“相对安静”时更新，避免学进吹气） ---
+  const quiet = rms < (rmsFloorRef.current + 0.015) && avg < (avgFloorRef.current + 6);
+  if (quiet) {
+    const a = 0.03; // 跟随速度
+    rmsFloorRef.current = rmsFloorRef.current === 0 ? rms : (1 - a) * rmsFloorRef.current + a * rms;
+    avgFloorRef.current = avgFloorRef.current === 0 ? avg : (1 - a) * avgFloorRef.current + a * avg;
+  }
 
-        if (canTrigger && shouldTrigger) {
-          if (state === 'LISTENING') {
-            setState('COUNTDOWN');
-            lastStateTimeRef.current = now;
-            lastTriggerAtRef.current = now;
-            blowHitFramesRef.current = 0;
-          } else if (state === 'CANDLES_LIT') {
-            setState('BLOW_OUT');
-            lastStateTimeRef.current = now;
-            lastTriggerAtRef.current = now;
-            blowHitFramesRef.current = 0;
-          }
-        }
-      }
+  // --- 触发条件（相对阈值） ---
+  // 手机更容易被降噪吞：阈值不要太高
+  const isCoarsePointer = window.matchMedia?.("(pointer:coarse)")?.matches ?? false;
+  const rmsDelta = isCoarsePointer ? 0.03 : 0.04;
+  const avgDelta = isCoarsePointer ? 10 : 14;
+
+  const hit =
+    (rms > rmsFloorRef.current + rmsDelta) ||
+    (avg > avgFloorRef.current + avgDelta) ||
+    (lowAvg > avgFloorRef.current + avgDelta);
+
+  // 防抖：手机需要更少帧
+  const requiredFrames = isCoarsePointer ? 3 : 3;
+  const cooldownMs = 500;
+
+  if (hit) blowHitFramesRef.current += 1;
+  else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
+
+  const canTrigger = now - lastTriggerAtRef.current > cooldownMs;
+  const shouldTrigger = blowHitFramesRef.current >= requiredFrames;
+
+  // ✅ 调试 HUD（你马上能看到有没有声音输入）
+  setDebugAudio({
+    rms,
+    avg,
+    low: lowAvg,
+    ctx: audioCtxRef.current?.state ?? "unknown",
+  });
+
+  if (canTrigger && shouldTrigger) {
+    if (state === "LISTENING") {
+      setState("COUNTDOWN");
+      lastStateTimeRef.current = now;
+      lastTriggerAtRef.current = now;
+      blowHitFramesRef.current = 0;
+    } else if (state === "CANDLES_LIT") {
+      setState("BLOW_OUT");
+      lastStateTimeRef.current = now;
+      lastTriggerAtRef.current = now;
+      blowHitFramesRef.current = 0;
+    }
+  }
+}
+
 
       fsmTimerRef.current = requestAnimationFrame(update);
     };
