@@ -10,6 +10,12 @@ import { generateLuxuryGreeting } from './services/geminiService';
 
 const GREETING_CACHE_KEY = 'ZJB_AI_GREETING_V1';
 
+// ✅ 第二次吹气检测：至少保留画面停留 4s 后才允许触发
+const SECOND_STAGE_MIN_HOLD_MS = 4000;
+
+// ✅ 第二次吹气检测：进入 CANDLES_LIT 后，先采样噪声基线（校准窗口）
+const SECOND_STAGE_CALIBRATE_MS = 1200;
+
 const TypewriterText: React.FC<{ text: string; delay?: number }> = ({ text, delay = 50 }) => {
   const [displayedText, setDisplayedText] = useState('');
   const [index, setIndex] = useState(0);
@@ -188,8 +194,14 @@ const App: React.FC = () => {
   const blowHitFramesRef = useRef<number>(0);
   const lastTriggerAtRef = useRef<number>(0);
 
-  // ✅ 专门记录进入点蜡烛阶段的时间（修复“第二次被锁死/被刷新”的根因）
+  // ✅ 记录进入点蜡烛阶段的时间
   const candlesEnteredAtRef = useRef<number>(0);
+
+  // ✅ 二次吹气：动态基线（噪声地板）+ 校准窗口 + 上一帧 RMS
+  const baselineRmsRef = useRef<number>(0);
+  const baselineLowRef = useRef<number>(0);
+  const calibrateUntilRef = useRef<number>(0);
+  const prevRmsRef = useRef<number>(0);
 
   const DURATIONS: Record<string, number> = {
     COUNTDOWN: 3000,
@@ -204,7 +216,6 @@ const App: React.FC = () => {
     window.setTimeout(() => setShowFlash(false), 150);
   };
 
-  // ✅ 兼容电脑/手机的麦克风初始化（优先关闭处理，失败回退）
   const initMic = async () => {
     try {
       let stream: MediaStream;
@@ -243,7 +254,12 @@ const App: React.FC = () => {
 
       blowHitFramesRef.current = 0;
       lastTriggerAtRef.current = 0;
+
       candlesEnteredAtRef.current = 0;
+      baselineRmsRef.current = 0;
+      baselineLowRef.current = 0;
+      calibrateUntilRef.current = 0;
+      prevRmsRef.current = 0;
 
       setMicActive(true);
       setState('LISTENING');
@@ -266,8 +282,17 @@ const App: React.FC = () => {
           setState('MORPH_CAKE');
         } else if (state === 'MORPH_CAKE') {
           setState('CANDLES_LIT');
-          candlesEnteredAtRef.current = now; // ✅ 记录进入点蜡烛的时刻
-          lastTriggerAtRef.current = now;    // ✅ 进入点蜡烛后先冷却
+
+          // ✅ 进入蜡烛阶段：记录时间 + 校准基线
+          candlesEnteredAtRef.current = now;
+          baselineRmsRef.current = 0;
+          baselineLowRef.current = 0;
+          calibrateUntilRef.current = now + SECOND_STAGE_CALIBRATE_MS;
+          prevRmsRef.current = 0;
+          blowHitFramesRef.current = 0;
+
+          // 给一点冷却，避免切换瞬间残余触发
+          lastTriggerAtRef.current = now;
         } else if (state === 'BLOW_OUT') {
           setState('GIFT_OPEN');
         }
@@ -290,7 +315,7 @@ const App: React.FC = () => {
         analyser.getByteFrequencyData(freq);
         const average = freq.reduce((a, b) => a + b, 0) / freq.length;
 
-        // 低频（吹气常见）
+        // 低频均值
         const lowBins = Math.min(15, freq.length);
         const lowAvg = freq.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
 
@@ -306,33 +331,58 @@ const App: React.FC = () => {
 
         const isPhoneLike = window.matchMedia?.('(pointer:coarse)')?.matches ?? false;
 
-        // ✅ 二次吹气保护：点蜡烛出现后至少停留 900ms 才允许触发第二次
-        const secondStageArmed =
-          state !== 'CANDLES_LIT' || (now - candlesEnteredAtRef.current > 900);
+        // ✅ 第二次：必须先停留至少 4s，才开始允许监测触发
+        const holdEnough =
+          state !== 'CANDLES_LIT' || (now - candlesEnteredAtRef.current >= SECOND_STAGE_MIN_HOLD_MS);
 
-        // ✅ 电脑第一次吹气保留“平均频域”触发（只在 LISTENING 使用）
+        // ✅ 第二次：仍然保留“额外上锁”逻辑（防止切换瞬间）
+        const secondStageArmed = state !== 'CANDLES_LIT' || holdEnough;
+
+        // ✅ 校准期：更新环境噪声基线（EMA）
+        const isCalibrating = state === 'CANDLES_LIT' && now < calibrateUntilRef.current;
+        if (state === 'CANDLES_LIT') {
+          const alpha = 0.08;
+          baselineRmsRef.current =
+            baselineRmsRef.current === 0 ? rms : (1 - alpha) * baselineRmsRef.current + alpha * rms;
+          baselineLowRef.current =
+            baselineLowRef.current === 0
+              ? lowAvg
+              : (1 - alpha) * baselineLowRef.current + alpha * lowAvg;
+        }
+
+        // ✅ LISTENING：电脑第一次吹气仍然沿用原逻辑（绝对阈值）
         const desktopLegacyHit = state === 'LISTENING' && average > 75;
+        const rmsHitFirst = rms > (isPhoneLike ? 0.02 : 0.04);
+        const lowHitFirst = lowAvg > (isPhoneLike ? 40 : 60);
+        const avgHitFirst = average > (isPhoneLike ? 55 : 65);
+        const hitFirst = desktopLegacyHit || rmsHitFirst || lowHitFirst || avgHitFirst;
 
-        // 手机阈值更低一点，避免吹不动
-        const rmsHit = rms > (isPhoneLike ? 0.02 : 0.04);
-        const lowHit = lowAvg > (isPhoneLike ? 40 : 60);
+        // ✅ CANDLES_LIT：必须相对基线“突增”才算吹气
+        const deltaRms = isPhoneLike ? 0.015 : 0.02;
+        const deltaLow = isPhoneLike ? 18 : 25;
+        const rising = (rms - prevRmsRef.current) > (isPhoneLike ? 0.003 : 0.004);
 
-        // avgHit 仅作为第一次辅助，第二次不用它（避免噪声误触发）
-        const avgHit =
-          state === 'LISTENING'
-            ? average > (isPhoneLike ? 55 : 65)
-            : average > (isPhoneLike ? 65 : 75);
+        const rmsHitSecond = rms > (baselineRmsRef.current + deltaRms);
+        const lowHitSecond = lowAvg > (baselineLowRef.current + deltaLow);
 
-        // LISTENING：放宽（兼容电脑）
-        // CANDLES_LIT：收紧（必须像吹气：低频/瞬态），并且要 armed
+        const hitSecond =
+          secondStageArmed &&
+          !isCalibrating &&
+          rising &&
+          rmsHitSecond &&
+          lowHitSecond;
+
+        // ✅ 最终命中：只在 LISTENING 或 CANDLES_LIT 两个阶段响应
         const hit =
-          state === 'LISTENING'
-            ? (desktopLegacyHit || rmsHit || lowHit || avgHit)
-            : (secondStageArmed && (rmsHit || lowHit));
+          state === 'LISTENING' ? hitFirst : state === 'CANDLES_LIT' ? hitSecond : false;
 
-        // 防抖 + 冷却：第二次冷却更长，避免瞬间误触发
-        const requiredFrames = desktopLegacyHit ? 1 : isPhoneLike ? 2 : 2;
-        const cooldownMs = state === 'CANDLES_LIT' ? 900 : 350;
+        // 更新上一帧 RMS（用于上升沿检测）
+        prevRmsRef.current = rms;
+
+        // 防抖 + 冷却
+        const requiredFrames =
+          state === 'CANDLES_LIT' ? 3 : desktopLegacyHit ? 1 : isPhoneLike ? 2 : 2;
+        const cooldownMs = state === 'CANDLES_LIT' ? 1200 : 350;
 
         if (hit) blowHitFramesRef.current += 1;
         else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
@@ -347,10 +397,13 @@ const App: React.FC = () => {
             lastTriggerAtRef.current = now;
             blowHitFramesRef.current = 0;
           } else if (state === 'CANDLES_LIT') {
-            setState('BLOW_OUT');
-            lastStateTimeRef.current = now;
-            lastTriggerAtRef.current = now;
-            blowHitFramesRef.current = 0;
+            // ✅ 第二次：必须 holdEnough 才能触发（确保停留至少 4s）
+            if (holdEnough) {
+              setState('BLOW_OUT');
+              lastStateTimeRef.current = now;
+              lastTriggerAtRef.current = now;
+              blowHitFramesRef.current = 0;
+            }
           }
         }
       }
