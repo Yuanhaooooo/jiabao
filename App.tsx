@@ -279,12 +279,11 @@ const handleInitialize = async () => {
     }
 
     initMic();
-  } catch (e) {
-    console.error("AI greeting failed:", e);
-    // ✅ 失败也给一个祝辞，保证 UI 一定显示
-    setGreeting(fallback);
-    initMic();
-  }
+} catch (e) {
+  console.error("AI greeting failed:", e);
+  setGreeting({ message: "（AI 核心暂时离线）生日快乐。", author: "LOCAL_FALLBACK" });
+  initMic();
+ }
 };
 
   const fixedMessage = `张家宝，生日快乐。
