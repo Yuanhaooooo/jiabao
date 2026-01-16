@@ -7,9 +7,12 @@
 
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Inter:wght@100..900&family=DotGothic16&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Inter:wght@100..900&family=DotGothic16&display=swap"
+      rel="stylesheet"
+    />
 
     <style>
       body {
@@ -17,29 +20,57 @@
         padding: 0;
         background-color: #020202;
         overflow: hidden;
-        font-family: 'DotGothic16', sans-serif;
+        font-family: "DotGothic16", sans-serif;
         color: #fff;
       }
-      .font-luxury { font-family: 'Playfair Display', serif; }
-      .font-pixel { font-family: 'DotGothic16', sans-serif; }
+      .font-luxury {
+        font-family: "Playfair Display", serif;
+      }
+      .font-pixel {
+        font-family: "DotGothic16", sans-serif;
+      }
       .typewriter-cursor::after {
-        content: '_';
+        content: "_";
         animation: blink 1s step-end infinite;
       }
-      @keyframes blink { from, to { opacity: 1; } 50% { opacity: 0; } }
-      @keyframes scanline { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
+      @keyframes blink {
+        from,
+        to {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0;
+        }
+      }
+      @keyframes scanline {
+        0% {
+          transform: translateY(-100%);
+        }
+        100% {
+          transform: translateY(100%);
+        }
+      }
       .scanline {
         position: absolute;
-        top: 0; left: 0;
+        top: 0;
+        left: 0;
         width: 100%;
         height: 2px;
         background: rgba(202, 138, 4, 0.2);
         animation: scanline 4s linear infinite;
         pointer-events: none;
       }
-      ::-webkit-scrollbar { width: 4px; }
-      ::-webkit-scrollbar-track { background: rgba(0,0,0,0.5); }
-      ::-webkit-scrollbar-thumb { background: #ca8a04; }
+
+      /* VoiceArchive / 面板滚动条：像素风 */
+      ::-webkit-scrollbar {
+        width: 4px;
+      }
+      ::-webkit-scrollbar-track {
+        background: rgba(0, 0, 0, 0.5);
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #ca8a04;
+      }
     </style>
 
     <script type="importmap">
@@ -58,8 +89,8 @@
       }
     </script>
 
-    <!-- 如果你确实有 index.css，就取消注释并确保文件存在 -->
-    <!-- <link rel="stylesheet" href="./index.css"> -->
+    <!-- 如果你确实有 index.css，就保留；没有就删掉这一行 -->
+    <link rel="stylesheet" href="./index.css" />
   </head>
 
   <body>
