@@ -9,6 +9,8 @@ import VoiceArchive from './components/VoiceArchive';
 import { ExperienceState, GreetingData } from './types';
 import { generateLuxuryGreeting } from './services/geminiService';
 
+const GREETING_CACHE_KEY = "ZJB_AI_GREETING_V1";
+
 const TypewriterText: React.FC<{ text: string; delay?: number }> = ({ text, delay = 50 }) => {
   const [displayedText, setDisplayedText] = useState('');
   const [index, setIndex] = useState(0);
@@ -233,11 +235,42 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(fsmTimerRef.current);
   }, [state, micActive]);
 
-  const handleInitialize = async () => {
+const handleInitialize = async () => {
+  // 1️⃣ 先查本地缓存
+  const cached = localStorage.getItem(GREETING_CACHE_KEY);
+
+  if (cached) {
+    // 已经生成过，直接使用
+    try {
+      const parsed = JSON.parse(cached);
+      setGreeting(parsed);
+      initMic();
+      return;
+    } catch {
+      // 如果缓存损坏，清掉重新生成
+      localStorage.removeItem(GREETING_CACHE_KEY);
+    }
+  }
+
+  // 2️⃣ 没缓存，才调用 Gemini（只会发生一次）
+  try {
     const result = await generateLuxuryGreeting(subjectName);
+
     setGreeting(result);
+
+    // 3️⃣ 写入缓存
+    localStorage.setItem(
+      GREETING_CACHE_KEY,
+      JSON.stringify(result)
+    );
+
     initMic();
-  };
+  } catch (e) {
+    console.error("AI greeting failed:", e);
+    // 即使 AI 挂了，也不要阻塞仪式
+    initMic();
+  }
+};
 
   const fixedMessage = `张家宝，生日快乐。
 祝你享受宇宙尘埃中的每一刻平和喜乐。
