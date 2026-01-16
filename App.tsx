@@ -10,10 +10,9 @@ import { generateLuxuryGreeting } from './services/geminiService';
 
 const GREETING_CACHE_KEY = 'ZJB_AI_GREETING_V1';
 
-// ✅ 第二次吹气检测：至少保留画面停留 4s 后才允许触发
+// ✅ 第二次：进入 CANDLES_LIT 后至少停留 4s 才允许检测
 const SECOND_STAGE_MIN_HOLD_MS = 4000;
-
-// ✅ 第二次吹气检测：进入 CANDLES_LIT 后，先采样噪声基线（校准窗口）
+// ✅ 第二次：进入 CANDLES_LIT 后先用 1.2s 校准环境噪声基线
 const SECOND_STAGE_CALIBRATE_MS = 1200;
 
 const TypewriterText: React.FC<{ text: string; delay?: number }> = ({ text, delay = 50 }) => {
@@ -47,18 +46,14 @@ const LifeTimer: React.FC = () => {
       const secs = Math.floor((diff % (1000 * 60)) / 1000);
       const msecs = Math.floor(diff % 1000);
 
-      setTimeStr(
-        `${hours.toLocaleString()}H ${mins}M ${secs}S ${msecs.toString().padStart(3, '0')}MS`
-      );
+      setTimeStr(`${hours.toLocaleString()}H ${mins}M ${secs}S ${msecs.toString().padStart(3, '0')}MS`);
     }, 47);
     return () => window.clearInterval(interval);
   }, []);
 
   return (
     <div className="flex flex-col items-end">
-      <div className="text-yellow-500/40 text-[7px] uppercase tracking-widest mb-1 font-mono">
-        张家宝 已度过地球时间
-      </div>
+      <div className="text-yellow-500/40 text-[7px] uppercase tracking-widest mb-1 font-mono">张家宝 已度过地球时间</div>
       <div className="text-yellow-500 font-mono text-[10px] tracking-widest bg-yellow-500/5 px-2 py-1 border border-yellow-500/10 shadow-[0_0_10px_rgba(202,138,4,0.1)]">
         {timeStr}
       </div>
@@ -115,22 +110,14 @@ const CameraFrame: React.FC<{ isActive: boolean; onFlash: () => void }> = ({ isA
   return (
     <div className="fixed top-1/2 left-12 -translate-y-1/2 w-80 h-[480px] border border-yellow-500/30 bg-black/80 backdrop-blur-xl p-1 pointer-events-auto animate-in fade-in slide-in-from-left-10 duration-500 flex flex-col shadow-[0_0_50px_rgba(0,0,0,0.5)] z-50">
       <div className="relative flex-1 overflow-hidden group border border-yellow-500/10">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-cover grayscale brightness-75 contrast-125"
-        />
+        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover grayscale brightness-75 contrast-125" />
         <canvas ref={canvasRef} className="hidden" />
         <div className="absolute inset-0 border border-yellow-500/20 pointer-events-none"></div>
         <div className="scanline"></div>
 
         <div className="absolute top-2 left-2 flex gap-1 items-center">
           <div className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse shadow-[0_0_5px_#ca8a04]"></div>
-          <p className="text-[7px] text-yellow-500/80 font-mono tracking-tighter uppercase">
-            实时视觉流: BIO_STABILIZED
-          </p>
+          <p className="text-[7px] text-yellow-500/80 font-mono tracking-tighter uppercase">实时视觉流: BIO_STABILIZED</p>
         </div>
 
         <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
@@ -153,18 +140,14 @@ const CameraFrame: React.FC<{ isActive: boolean; onFlash: () => void }> = ({ isA
               <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-75"></span>
               <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-150"></span>
             </div>
-            <p className="text-[9px] text-yellow-500 font-pixel tracking-widest animate-pulse">
-              别忘记合影留念
-            </p>
+            <p className="text-[9px] text-yellow-500 font-pixel tracking-widest animate-pulse">别忘记合影留念</p>
           </div>
         </div>
       </div>
 
       <div className="p-3 text-center flex justify-between items-center">
         <span className="text-[7px] text-yellow-500/30 font-mono">SECURE_CHANNEL_17</span>
-        <span className="text-[8px] text-yellow-500/40 uppercase tracking-widest font-mono">
-          BIO_RECORDER // CORE
-        </span>
+        <span className="text-[8px] text-yellow-500/40 uppercase tracking-widest font-mono">BIO_RECORDER // CORE</span>
         <span className="text-[7px] text-yellow-500/30 font-mono">STABLE</span>
       </div>
     </div>
@@ -190,18 +173,21 @@ const App: React.FC = () => {
   const fsmTimerRef = useRef<number>(0);
   const lastStateTimeRef = useRef<number>(Date.now());
 
-  // 吹气增强：防抖 + 冷却
+  // 吹气：防抖 + 冷却
   const blowHitFramesRef = useRef<number>(0);
   const lastTriggerAtRef = useRef<number>(0);
 
-  // ✅ 记录进入点蜡烛阶段的时间
+  // ✅ 第二次：阶段时间
   const candlesEnteredAtRef = useRef<number>(0);
 
-  // ✅ 二次吹气：动态基线（噪声地板）+ 校准窗口 + 上一帧 RMS
+  // ✅ 第二次：噪声基线 + 校准
   const baselineRmsRef = useRef<number>(0);
   const baselineLowRef = useRef<number>(0);
   const calibrateUntilRef = useRef<number>(0);
-  const prevRmsRef = useRef<number>(0);
+
+  // ✅ 第二次：burst（短促爆发）检测
+  const burstFramesRef = useRef<number>(0);
+  const burstStartedAtRef = useRef<number>(0);
 
   const DURATIONS: Record<string, number> = {
     COUNTDOWN: 3000,
@@ -245,7 +231,6 @@ const App: React.FC = () => {
 
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
-
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.65;
 
@@ -259,7 +244,8 @@ const App: React.FC = () => {
       baselineRmsRef.current = 0;
       baselineLowRef.current = 0;
       calibrateUntilRef.current = 0;
-      prevRmsRef.current = 0;
+      burstFramesRef.current = 0;
+      burstStartedAtRef.current = 0;
 
       setMicActive(true);
       setState('LISTENING');
@@ -285,13 +271,15 @@ const App: React.FC = () => {
 
           // ✅ 进入蜡烛阶段：记录时间 + 校准基线
           candlesEnteredAtRef.current = now;
+
           baselineRmsRef.current = 0;
           baselineLowRef.current = 0;
           calibrateUntilRef.current = now + SECOND_STAGE_CALIBRATE_MS;
-          prevRmsRef.current = 0;
-          blowHitFramesRef.current = 0;
 
-          // 给一点冷却，避免切换瞬间残余触发
+          burstFramesRef.current = 0;
+          burstStartedAtRef.current = 0;
+
+          blowHitFramesRef.current = 0;
           lastTriggerAtRef.current = now;
         } else if (state === 'BLOW_OUT') {
           setState('GIFT_OPEN');
@@ -301,9 +289,7 @@ const App: React.FC = () => {
         setProgress(0);
         blowHitFramesRef.current = 0;
       } else {
-        if (duration !== Infinity) {
-          setProgress(Math.min(elapsed / duration, 1));
-        }
+        if (duration !== Infinity) setProgress(Math.min(elapsed / duration, 1));
       }
 
       // --- 吹气检测 ---
@@ -331,17 +317,16 @@ const App: React.FC = () => {
 
         const isPhoneLike = window.matchMedia?.('(pointer:coarse)')?.matches ?? false;
 
-        // ✅ 第二次：必须先停留至少 4s，才开始允许监测触发
+        // ✅ 第二次：先停 4 秒再检测
         const holdEnough =
-          state !== 'CANDLES_LIT' || (now - candlesEnteredAtRef.current >= SECOND_STAGE_MIN_HOLD_MS);
+          state !== 'CANDLES_LIT' || now - candlesEnteredAtRef.current >= SECOND_STAGE_MIN_HOLD_MS;
 
-        // ✅ 第二次：仍然保留“额外上锁”逻辑（防止切换瞬间）
-        const secondStageArmed = state !== 'CANDLES_LIT' || holdEnough;
-
-        // ✅ 校准期：更新环境噪声基线（EMA）
+        // ✅ 第二次：校准期（前 1.2s 只更新基线，不触发）
         const isCalibrating = state === 'CANDLES_LIT' && now < calibrateUntilRef.current;
+
+        // ✅ 基线更新（EMA），更稳：避免基线被吹气拖走
         if (state === 'CANDLES_LIT') {
-          const alpha = 0.08;
+          const alpha = 0.06;
           baselineRmsRef.current =
             baselineRmsRef.current === 0 ? rms : (1 - alpha) * baselineRmsRef.current + alpha * rms;
           baselineLowRef.current =
@@ -350,34 +335,56 @@ const App: React.FC = () => {
               : (1 - alpha) * baselineLowRef.current + alpha * lowAvg;
         }
 
-        // ✅ LISTENING：电脑第一次吹气仍然沿用原逻辑（绝对阈值）
+        // ✅ 第一次：LISTENING（保留原逻辑，兼容电脑）
         const desktopLegacyHit = state === 'LISTENING' && average > 75;
-        const rmsHitFirst = rms > (isPhoneLike ? 0.02 : 0.04);
-        const lowHitFirst = lowAvg > (isPhoneLike ? 40 : 60);
-        const avgHitFirst = average > (isPhoneLike ? 55 : 65);
-        const hitFirst = desktopLegacyHit || rmsHitFirst || lowHitFirst || avgHitFirst;
+        const hitFirst =
+          desktopLegacyHit ||
+          rms > (isPhoneLike ? 0.02 : 0.04) ||
+          lowAvg > (isPhoneLike ? 40 : 60) ||
+          average > (isPhoneLike ? 55 : 65);
 
-        // ✅ CANDLES_LIT：必须相对基线“突增”才算吹气
-        const deltaRms = isPhoneLike ? 0.015 : 0.02;
-        const deltaLow = isPhoneLike ? 18 : 25;
-        const rising = (rms - prevRmsRef.current) > (isPhoneLike ? 0.003 : 0.004);
+        // ✅ 第二次：burst（短促爆发）检测
+        const deltaRms = isPhoneLike ? 0.014 : 0.02;
+        const deltaLow = isPhoneLike ? 14 : 22;
 
-        const rmsHitSecond = rms > (baselineRmsRef.current + deltaRms);
-        const lowHitSecond = lowAvg > (baselineLowRef.current + deltaLow);
+        const aboveRms = rms > baselineRmsRef.current + deltaRms;
+        const aboveLow = lowAvg > baselineLowRef.current + deltaLow;
+
+        const secondCandidate =
+          state === 'CANDLES_LIT' && holdEnough && !isCalibrating && aboveRms && aboveLow;
+
+        // burst 规则：320ms 内累计 >=4 帧命中才触发（持续噪声不会慢慢累积）
+        const burstWindowMs = 320;
+        const burstNeedFrames = 4;
+
+        if (state === 'CANDLES_LIT') {
+          if (secondCandidate) {
+            if (burstStartedAtRef.current === 0) burstStartedAtRef.current = now;
+            burstFramesRef.current += 1;
+
+            if (now - burstStartedAtRef.current > burstWindowMs) {
+              burstStartedAtRef.current = now;
+              burstFramesRef.current = 1;
+            }
+          } else {
+            if (burstStartedAtRef.current !== 0 && now - burstStartedAtRef.current > burstWindowMs) {
+              burstStartedAtRef.current = 0;
+              burstFramesRef.current = 0;
+            }
+          }
+        } else {
+          // 不在该阶段就清理，避免跨阶段误判
+          burstStartedAtRef.current = 0;
+          burstFramesRef.current = 0;
+        }
 
         const hitSecond =
-          secondStageArmed &&
+          state === 'CANDLES_LIT' &&
+          holdEnough &&
           !isCalibrating &&
-          rising &&
-          rmsHitSecond &&
-          lowHitSecond;
+          burstFramesRef.current >= burstNeedFrames;
 
-        // ✅ 最终命中：只在 LISTENING 或 CANDLES_LIT 两个阶段响应
-        const hit =
-          state === 'LISTENING' ? hitFirst : state === 'CANDLES_LIT' ? hitSecond : false;
-
-        // 更新上一帧 RMS（用于上升沿检测）
-        prevRmsRef.current = rms;
+        const hit = state === 'LISTENING' ? hitFirst : state === 'CANDLES_LIT' ? hitSecond : false;
 
         // 防抖 + 冷却
         const requiredFrames =
@@ -397,12 +404,16 @@ const App: React.FC = () => {
             lastTriggerAtRef.current = now;
             blowHitFramesRef.current = 0;
           } else if (state === 'CANDLES_LIT') {
-            // ✅ 第二次：必须 holdEnough 才能触发（确保停留至少 4s）
-            if (holdEnough) {
+            // ✅ 第二次：必须 holdEnough 且 hitSecond（burst）通过
+            if (holdEnough && hitSecond) {
               setState('BLOW_OUT');
               lastStateTimeRef.current = now;
               lastTriggerAtRef.current = now;
               blowHitFramesRef.current = 0;
+
+              // 清 burst，防止继续触发
+              burstStartedAtRef.current = 0;
+              burstFramesRef.current = 0;
             }
           }
         }
@@ -486,12 +497,7 @@ const App: React.FC = () => {
 
       <Canvas shadows dpr={[1, 2]} gl={{ preserveDrawingBuffer: true, antialias: true }}>
         <PerspectiveCamera makeDefault position={[0, 1, 12]} fov={35} />
-        <OrbitControls
-          enablePan={false}
-          enableZoom={false}
-          autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GIFT_OPEN'}
-          autoRotateSpeed={0.35}
-        />
+        <OrbitControls enablePan={false} enableZoom={false} autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GIFT_OPEN'} autoRotateSpeed={0.35} />
 
         <Suspense fallback={null}>
           <ParticleSystem state={state} progress={progress} />
@@ -501,16 +507,8 @@ const App: React.FC = () => {
               <Float speed={8} rotationIntensity={1} floatIntensity={1}>
                 <mesh>
                   <sphereGeometry args={[0.15, 32, 32]} />
-                  <meshStandardMaterial
-                    color="#ffd700"
-                    emissive="#ca8a04"
-                    emissiveIntensity={state === 'BLOW_OUT' ? 20 * (1 - progress) : 15}
-                  />
-                  <pointLight
-                    intensity={state === 'BLOW_OUT' ? 30 * (1 - progress) : 25}
-                    color="#ca8a04"
-                    distance={10}
-                  />
+                  <meshStandardMaterial color="#ffd700" emissive="#ca8a04" emissiveIntensity={state === 'BLOW_OUT' ? 20 * (1 - progress) : 15} />
+                  <pointLight intensity={state === 'BLOW_OUT' ? 30 * (1 - progress) : 25} color="#ca8a04" distance={10} />
                 </mesh>
               </Float>
             </group>
@@ -527,11 +525,10 @@ const App: React.FC = () => {
       <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-between p-8 md:p-12 z-10 font-pixel">
         <div className="w-full flex justify-between items-start">
           <div className="text-left border-l border-yellow-500/30 pl-4">
-            <h1 className="text-[10px] tracking-[0.8em] uppercase text-yellow-500/60 mb-1">
-              AETHELGARD CORE v3.1
-            </h1>
+            <h1 className="text-[10px] tracking-[0.8em] uppercase text-yellow-500/60 mb-1">AETHELGARD CORE v3.1</h1>
             <p className="text-white/20 text-[8px] tracking-[0.3em]">SYNCHRONIZING BIO-METRIC... STATUS: STABLE</p>
           </div>
+
           <div className="text-right">
             <div className="flex flex-col items-end gap-3 pointer-events-auto">
               {state === 'GIFT_OPEN' && (
@@ -539,71 +536,37 @@ const App: React.FC = () => {
                   <button
                     onClick={() => setIsCameraActive(!isCameraActive)}
                     className={`w-12 h-12 border border-yellow-500/30 flex items-center justify-center transition-all bg-black/40 ${
-                      isCameraActive
-                        ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500'
-                        : 'hover:bg-white/10'
+                      isCameraActive ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500' : 'hover:bg-white/10'
                     }`}
                     title="记录留存"
                   >
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="text-yellow-500"
-                    >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-500">
                       <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                       <circle cx="12" cy="13" r="4" />
                     </svg>
                   </button>
+
                   <button
                     onClick={() => setIsMailOpen(!isMailOpen)}
                     className={`w-12 h-12 border border-yellow-500/30 flex items-center justify-center transition-all bg-black/40 ${
-                      isMailOpen
-                        ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500'
-                        : 'hover:bg-white/10'
+                      isMailOpen ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500' : 'hover:bg-white/10'
                     }`}
                     title="祝辞协议"
                   >
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="text-yellow-500"
-                    >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-500">
                       <rect x="2" y="4" width="20" height="16" rx="2" />
                       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
                     </svg>
                   </button>
+
                   <button
                     onClick={() => setIsArchiveOpen(!isArchiveOpen)}
                     className={`w-12 h-12 border border-yellow-500/30 flex items-center justify-center transition-all bg-black/40 ${
-                      isArchiveOpen
-                        ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500'
-                        : 'hover:bg-white/10'
+                      isArchiveOpen ? 'bg-yellow-500/20 shadow-[0_0_15px_rgba(202,138,4,0.4)] border-yellow-500' : 'hover:bg-white/10'
                     }`}
                     title="语音存档"
                   >
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="text-yellow-500"
-                    >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-500">
                       <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
                       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                       <line x1="12" y1="19" x2="12" y2="23" />
@@ -626,14 +589,9 @@ const App: React.FC = () => {
                 </div>
               </div>
               <h2 className="font-pixel text-5xl text-white mb-2 tracking-widest uppercase">张家宝</h2>
-              <p className="text-yellow-500/60 text-[11px] uppercase tracking-[0.6em] mb-12 italic">
-                维度觉醒协议：17 岁生辰
-              </p>
+              <p className="text-yellow-500/60 text-[11px] uppercase tracking-[0.6em] mb-12 italic">维度觉醒协议：17 岁生辰</p>
 
-              <button
-                onClick={handleInitialize}
-                className="group relative px-12 py-5 overflow-hidden rounded-sm transition-all bg-transparent border border-yellow-500/50"
-              >
+              <button onClick={handleInitialize} className="group relative px-12 py-5 overflow-hidden rounded-sm transition-all bg-transparent border border-yellow-500/50">
                 <div className="absolute inset-0 bg-yellow-500/10 group-hover:bg-yellow-500/20 transition-colors"></div>
                 <div className="relative text-yellow-500 tracking-[0.5em] uppercase text-sm font-bold">启动庆典系统</div>
                 <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-yellow-500"></div>
@@ -671,18 +629,14 @@ const App: React.FC = () => {
           {state === 'MORPH_CAKE' && (
             <div className="space-y-6">
               <p className="text-yellow-500 uppercase tracking-[0.8em] text-[10px]">凝聚物质位面实体</p>
-              <div className="font-mono text-[9px] text-white/30 tracking-widest uppercase">
-                COALESCING_PARTICLES... {Math.round(progress * 100)}%
-              </div>
+              <div className="font-mono text-[9px] text-white/30 tracking-widest uppercase">COALESCING_PARTICLES... {Math.round(progress * 100)}%</div>
             </div>
           )}
 
           {state === 'CANDLES_LIT' && (
             <div className="animate-in fade-in duration-1000 flex flex-col items-center">
               <div className="mb-8 p-8 border border-yellow-500/20 backdrop-blur-md bg-black/40">
-                <p className="text-yellow-500 uppercase tracking-[1em] text-[14px] mb-4 font-bold border-b border-yellow-500/40 pb-4 font-mono">
-                  拾七 · 华诞
-                </p>
+                <p className="text-yellow-500 uppercase tracking-[1em] text-[14px] mb-4 font-bold border-b border-yellow-500/40 pb-4 font-mono">拾七 · 华诞</p>
                 <h2 className="text-white text-6xl mb-2 font-pixel">张家宝</h2>
                 <p className="text-white/40 tracking-[0.5em] text-[10px] italic">愿以此光，引向不朽的辉煌</p>
               </div>
@@ -701,25 +655,19 @@ const App: React.FC = () => {
                 <div className="flex items-center justify-between gap-4 mb-8 border-b border-yellow-500/10 pb-6">
                   <div className="flex items-center gap-3">
                     <div className="w-2.5 h-2.5 bg-yellow-500 animate-pulse shadow-[0_0_10px_#ca8a04]"></div>
-                    <p className="text-yellow-500 uppercase tracking-[0.4em] text-[10px] font-bold font-mono">
-                      MESSAGE_ENCODED // PROTOCOL_17
-                    </p>
+                    <p className="text-yellow-500 uppercase tracking-[0.4em] text-[10px] font-bold font-mono">MESSAGE_ENCODED // PROTOCOL_17</p>
                   </div>
                   <LifeTimer />
                 </div>
 
                 <div className="font-pixel text-white/95 text-base leading-relaxed tracking-wider space-y-8">
-                  <div className="text-yellow-500/50 text-[10px] mb-2 uppercase tracking-tighter font-bold underline decoration-yellow-500/20 underline-offset-4 font-mono">
-                    [ADDR: CORE_ZJB]
-                  </div>
+                  <div className="text-yellow-500/50 text-[10px] mb-2 uppercase tracking-tighter font-bold underline decoration-yellow-500/20 underline-offset-4 font-mono">[ADDR: CORE_ZJB]</div>
                   <div className="bg-white/5 p-4 border-l-2 border-yellow-500/40">
                     <TypewriterText text={fixedMessage} delay={25} />
                   </div>
 
                   <div className="border-t border-yellow-500/10 pt-8 mt-8">
-                    <div className="text-yellow-500/50 text-[10px] mb-4 uppercase tracking-tighter font-bold font-mono">
-                      [EXT: AI_GREETING_PROTOCOL]
-                    </div>
+                    <div className="text-yellow-500/50 text-[10px] mb-4 uppercase tracking-tighter font-bold font-mono">[EXT: AI_GREETING_PROTOCOL]</div>
                     <div className="text-yellow-500 italic text-sm md:text-lg leading-relaxed px-4">
                       <TypewriterText text={`\n"${greeting.message}"`} delay={35} />
                     </div>
@@ -751,16 +699,9 @@ const App: React.FC = () => {
       <VoiceArchive isOpen={isArchiveOpen} onClose={() => setIsArchiveOpen(false)} />
 
       <style>{`
-        @keyframes spin-slow {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        @keyframes shimmer {
-          100% { transform: translateX(100%); }
-        }
-        .animate-spin-slow {
-          animation: spin-slow 25s linear infinite;
-        }
+        @keyframes spin-slow { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+        @keyframes shimmer { 100% { transform: translateX(100%);} }
+        .animate-spin-slow { animation: spin-slow 25s linear infinite; }
       `}</style>
     </div>
   );
