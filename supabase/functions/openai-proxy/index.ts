@@ -1,16 +1,47 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "https://yuanhaooooo.github.io/jiabao/", // 生产建议改成你的域名
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+/**
+ * 构建 CORS 头（关键修复点）
+ * - Access-Control-Allow-Origin 只能是 origin，不能带路径
+ * - 动态回显，防止 CORS 预检失败
+ */
+function buildCorsHeaders(req: Request) {
+  const origin = req.headers.get("origin") ?? "";
+
+  const allowlist = new Set([
+    "https://yuanhaooooo.github.io", // ✅ GitHub Pages（不带 /jiabao）
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ]);
+
+  const allowOrigin = allowlist.has(origin) ? origin : "";
+
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+  };
+}
 
 serve(async (req) => {
-  // CORS 预检
+  const corsHeaders = buildCorsHeaders(req);
+
+  // ===== CORS 预检请求 =====
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  // 拦截非法来源（重要但安全）
+  if (!corsHeaders["Access-Control-Allow-Origin"]) {
+    return new Response(
+      JSON.stringify({ error: "CORS blocked" }),
+      {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
   }
 
   // 只允许 POST
@@ -33,12 +64,9 @@ serve(async (req) => {
       );
     }
 
-    // 前端传入的 body（你可以只传 prompt，也可以传更完整参数）
     const body = await req.json();
-
-    // 你可以在前端传：
-    // { prompt: "hello", model: "gemini-flash-latest", temperature: 0.7 }
-    const model = body.model ?? "gemini-flash-latest"; // 常用：flash 快、pro 更强
+    const rawModel = body.model ?? "gemini-flash-latest";
+    const model = String(rawModel).replace(/^models\//, "");
     const prompt = body.prompt ?? "";
 
     if (!prompt || typeof prompt !== "string") {
@@ -48,13 +76,15 @@ serve(async (req) => {
       });
     }
 
-    // 参数保护（防滥用）
     const temperature =
       typeof body.temperature === "number" ? body.temperature : 0.7;
 
-    // ✅ Gemini REST API（Generative Language API）
+    const maxOutputTokens = Math.min(body.maxOutputTokens ?? 512, 2048);
+
     const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+        model
+      )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
     const geminiReq = {
       contents: [
@@ -65,8 +95,7 @@ serve(async (req) => {
       ],
       generationConfig: {
         temperature,
-        // 你也可以加 topP, topK, maxOutputTokens 等
-        maxOutputTokens: Math.min(body.maxOutputTokens ?? 512, 2048),
+        maxOutputTokens,
       },
     };
 
@@ -85,16 +114,13 @@ serve(async (req) => {
       });
     }
 
-    // 统一给前端一个更好用的返回结构
     const text =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).join("") ??
-      "";
+      data?.candidates?.[0]?.content?.parts
+        ?.map((p: any) => p?.text)
+        .join("") ?? "";
 
     return new Response(
-      JSON.stringify({
-        raw: data,
-        text,
-      }),
+      JSON.stringify({ text, raw: data }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       }
