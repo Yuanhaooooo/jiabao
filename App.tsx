@@ -261,7 +261,10 @@ const App: React.FC = () => {
 
       if (duration !== Infinity && elapsed > duration) {
         if (state === 'COUNTDOWN') setState('MORPH_CAKE');
-        else if (state === 'MORPH_CAKE') setState('CANDLES_LIT');
+else if (state === 'MORPH_CAKE') {
+  setState('CANDLES_LIT');
+  lastTriggerAtRef.current = now; // ✅ 进入点蜡烛后给 350ms 冷却保护
+}
         else if (state === 'BLOW_OUT') setState('GIFT_OPEN');
 
         lastStateTimeRef.current = now;
@@ -304,12 +307,15 @@ const App: React.FC = () => {
         // ✅ 关键：保留你原本“电脑可用”的触发方式（不让电脑变难）
         const desktopLegacyHit = average > 75;
 
-        // ✅ 新增：手机/降噪环境更容易触发（相对更宽松）
-        const rmsHit = rms > (isPhoneLike ? 0.03 : 0.04);
-        const lowHit = lowAvg > (isPhoneLike ? 50 : 60);
-        const avgHit = average > (isPhoneLike ? 55 : 65);
+// ✅ 只把“average > 75”用于第一次吹气（LISTENING）
+// 否则会在 CANDLES_LIT 被环境噪声直接跳到 BLOW_OUT
+const desktopLegacyHit = state === 'LISTENING' && average > 75;
 
-        const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
+const rmsHit = rms > (isPhoneLike ? 0.03 : 0.04);
+const lowHit = lowAvg > (isPhoneLike ? 50 : 60);
+const avgHit = average > (isPhoneLike ? 55 : 65);
+
+const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
 
         // 防抖 + 冷却：电脑保持“几乎立即”，手机也容易触发
         const requiredFrames = desktopLegacyHit ? 1 : isPhoneLike ? 2 : 2;
