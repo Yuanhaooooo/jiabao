@@ -14,12 +14,6 @@ const TypewriterText: React.FC<{ text: string; delay?: number }> = ({ text, dela
   const [displayedText, setDisplayedText] = useState('');
   const [index, setIndex] = useState(0);
 
-  // 如果 text 变了，重置打字机（避免切换时残留）
-  useEffect(() => {
-    setDisplayedText('');
-    setIndex(0);
-  }, [text]);
-
   useEffect(() => {
     if (index < text.length) {
       const timeout = window.setTimeout(() => {
@@ -51,7 +45,6 @@ const LifeTimer: React.FC = () => {
         `${hours.toLocaleString()}H ${mins}M ${secs}S ${msecs.toString().padStart(3, '0')}MS`
       );
     }, 47);
-
     return () => window.clearInterval(interval);
   }, []);
 
@@ -77,43 +70,38 @@ const CameraFrame: React.FC<{ isActive: boolean; onFlash: () => void }> = ({ isA
       navigator.mediaDevices
         .getUserMedia({ video: true, audio: false })
         .then((stream) => {
-          streamRef.current = stream;
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
+            streamRef.current = stream;
           }
         })
         .catch((err) => console.error('Camera access error:', err));
     } else {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
       }
     }
-
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
       }
     };
   }, [isActive]);
 
   const takePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    const context = canvasRef.current.getContext('2d');
-    if (!context) return;
-
-    onFlash();
-
-    canvasRef.current.width = videoRef.current.videoWidth;
-    canvasRef.current.height = videoRef.current.videoHeight;
-    context.drawImage(videoRef.current, 0, 0);
-
-    const link = document.createElement('a');
-    link.download = `ZJB_17_BIO_RECORD_${Date.now()}.png`;
-    link.href = canvasRef.current.toDataURL();
-    link.click();
+    if (videoRef.current && canvasRef.current) {
+      const context = canvasRef.current.getContext('2d');
+      if (context) {
+        onFlash();
+        canvasRef.current.width = videoRef.current.videoWidth;
+        canvasRef.current.height = videoRef.current.videoHeight;
+        context.drawImage(videoRef.current, 0, 0);
+        const link = document.createElement('a');
+        link.download = `ZJB_17_BIO_RECORD_${Date.now()}.png`;
+        link.href = canvasRef.current.toDataURL();
+        link.click();
+      }
+    }
   };
 
   if (!isActive) return null;
@@ -129,11 +117,11 @@ const CameraFrame: React.FC<{ isActive: boolean; onFlash: () => void }> = ({ isA
           className="w-full h-full object-cover grayscale brightness-75 contrast-125"
         />
         <canvas ref={canvasRef} className="hidden" />
-        <div className="absolute inset-0 border border-yellow-500/20 pointer-events-none" />
-        <div className="scanline" />
+        <div className="absolute inset-0 border border-yellow-500/20 pointer-events-none"></div>
+        <div className="scanline"></div>
 
         <div className="absolute top-2 left-2 flex gap-1 items-center">
-          <div className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse shadow-[0_0_5px_#ca8a04]" />
+          <div className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-pulse shadow-[0_0_5px_#ca8a04]"></div>
           <p className="text-[7px] text-yellow-500/80 font-mono tracking-tighter uppercase">
             实时视觉流: BIO_STABILIZED
           </p>
@@ -149,15 +137,15 @@ const CameraFrame: React.FC<{ isActive: boolean; onFlash: () => void }> = ({ isA
             onClick={takePhoto}
             className="w-full py-4 border border-yellow-500/50 bg-yellow-500/5 hover:bg-yellow-500/20 text-[10px] text-yellow-500 uppercase tracking-[0.5em] transition-all backdrop-blur-md font-mono shadow-[0_0_15px_rgba(202,138,4,0.1)] group relative overflow-hidden"
           >
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-yellow-500/10 to-transparent -translate-x-full group-hover:animate-[shimmer_2s_infinite]" />
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-yellow-500/10 to-transparent -translate-x-full group-hover:animate-[shimmer_2s_infinite]"></div>
             [ 记录实时流帧 ]
           </button>
 
           <div className="flex flex-col items-center gap-1.5 opacity-60">
             <div className="flex gap-2">
-              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse" />
-              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-75" />
-              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-150" />
+              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse"></span>
+              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-75"></span>
+              <span className="w-1 h-1 bg-yellow-500/40 rounded-full animate-pulse delay-150"></span>
             </div>
             <p className="text-[9px] text-yellow-500 font-pixel tracking-widest animate-pulse">
               别忘记合影留念
@@ -181,7 +169,6 @@ const App: React.FC = () => {
   const [state, setState] = useState<ExperienceState>('IDLE');
   const [progress, setProgress] = useState(0);
   const [greeting, setGreeting] = useState<GreetingData | null>(null);
-
   const [micActive, setMicActive] = useState(false);
   const [isMailOpen, setIsMailOpen] = useState(true);
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -191,34 +178,15 @@ const App: React.FC = () => {
   const subjectName = '张家宝';
 
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+
   const fsmTimerRef = useRef<number>(0);
   const lastStateTimeRef = useRef<number>(Date.now());
 
-  // ====== 音频相关（新增）======
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-
-  // 吹气检测用的自适应噪声地板
-  const rmsFloorRef = useRef<number>(0);
-  const avgFloorRef = useRef<number>(0);
-
-  // 连续帧 & 冷却
+  // 吹气增强：防抖 + 冷却（不影响UI）
   const blowHitFramesRef = useRef<number>(0);
   const lastTriggerAtRef = useRef<number>(0);
-
-  // 调试 HUD 用
-  const [debugAudio, setDebugAudio] = useState<{
-    rms: number;
-    avg: number;
-    low: number;
-    ctx: string;
-  }>({
-    rms: 0,
-    avg: 0,
-    low: 0,
-    ctx: 'n/a',
-  });
-
 
   const DURATIONS: Record<string, number> = {
     COUNTDOWN: 3000,
@@ -233,55 +201,57 @@ const App: React.FC = () => {
     window.setTimeout(() => setShowFlash(false), 150);
   };
 
- const initMic = async () => {
-  try {
-    // 兼容手机：尽量关掉处理；但如果失败，自动回退到默认 true
-    let stream: MediaStream;
+  // ✅ 兼容电脑/手机的麦克风初始化（优先关闭处理，失败回退）
+  const initMic = async () => {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        } as any,
-        video: false,
-      });
-    } catch {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      // 先尝试“手机友好”配置；失败则回退到默认（电脑更稳）
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          } as any,
+          video: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      }
+
+      micStreamRef.current = stream;
+
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = audioCtx;
+
+      if (audioCtx.state === 'suspended') {
+        try {
+          await audioCtx.resume();
+        } catch {}
+      }
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+
+      // 既保留你原来电脑可用的“频域平均”，也增强吹气识别
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.65;
+
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      // 重置防抖/冷却
+      blowHitFramesRef.current = 0;
+      lastTriggerAtRef.current = 0;
+
+      setMicActive(true);
+      setState('LISTENING');
+    } catch (err) {
+      console.error('Mic access denied', err);
+      setMicActive(false);
+      setState('LISTENING');
     }
-
-    streamRef.current = stream;
-
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    audioCtxRef.current = audioCtx;
-
-    // 手机/部分浏览器：必须 resume
-    if (audioCtx.state === "suspended") {
-      try { await audioCtx.resume(); } catch {}
-    }
-
-    const source = audioCtx.createMediaStreamSource(stream);
-    const analyser = audioCtx.createAnalyser();
-
-    analyser.fftSize = 1024;              // 更稳的时域 RMS（别用太小）
-    analyser.smoothingTimeConstant = 0.6;
-
-    source.connect(analyser);
-    analyserRef.current = analyser;
-
-    // 重置地板
-    rmsFloorRef.current = 0;
-    avgFloorRef.current = 0;
-
-    setMicActive(true);
-    setState("LISTENING");
-  } catch (err) {
-    console.warn("Mic access error:", err);
-    setMicActive(false);
-    setState("LISTENING");
-  }
-};
-
+  };
 
   useEffect(() => {
     const update = () => {
@@ -296,87 +266,75 @@ const App: React.FC = () => {
 
         lastStateTimeRef.current = now;
         setProgress(0);
-
-        // 状态切换时重置吹气“命中帧”
         blowHitFramesRef.current = 0;
-      } else if (duration !== Infinity) {
-        setProgress(Math.min(elapsed / duration, 1));
+      } else {
+        if (duration !== Infinity) {
+          setProgress(Math.min(elapsed / duration, 1));
+        }
       }
 
-if (analyserRef.current && micActive) {
-  const analyser = analyserRef.current;
+      // ✅ 吹气检测：保留电脑原逻辑 + 增强手机识别
+      if (analyserRef.current && micActive) {
+        const analyser = analyserRef.current;
 
-  // --- 频域（辅助） ---
-  const freq = new Uint8Array(analyser.frequencyBinCount);
-  analyser.getByteFrequencyData(freq);
+        // --- 频域（你的原逻辑核心）---
+        const freq = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(freq);
 
-  const lowBins = Math.min(15, freq.length);
-  const lowAvg = freq.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
-  const avg = freq.reduce((a, b) => a + b, 0) / freq.length;
+        const average = freq.reduce((a, b) => a + b, 0) / freq.length;
 
-  // --- 时域 RMS（核心：吹气/拍麦/气流更容易触发） ---
-  const time = new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(time);
+        // --- 低频增强（手机吹气常见）---
+        const lowBins = Math.min(15, freq.length);
+        const lowAvg = freq.slice(0, lowBins).reduce((a, b) => a + b, 0) / lowBins;
 
-  let sumSq = 0;
-  for (let i = 0; i < time.length; i++) {
-    const v = (time[i] - 128) / 128;
-    sumSq += v * v;
-  }
-  const rms = Math.sqrt(sumSq / time.length); // 0~1
+        // --- 时域 RMS（有些设备“吹气”更像瞬态/宽带）---
+        const time = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(time);
 
-  // --- 自适应地板（只在“相对安静”时更新，避免学进吹气） ---
-  const quiet = rms < (rmsFloorRef.current + 0.015) && avg < (avgFloorRef.current + 6);
-  if (quiet) {
-    const a = 0.03; // 跟随速度
-    rmsFloorRef.current = rmsFloorRef.current === 0 ? rms : (1 - a) * rmsFloorRef.current + a * rms;
-    avgFloorRef.current = avgFloorRef.current === 0 ? avg : (1 - a) * avgFloorRef.current + a * avg;
-  }
+        let sumSq = 0;
+        for (let i = 0; i < time.length; i++) {
+          const v = (time[i] - 128) / 128;
+          sumSq += v * v;
+        }
+        const rms = Math.sqrt(sumSq / time.length); // 0~1
 
-  // --- 触发条件（相对阈值） ---
-  // 手机更容易被降噪吞：阈值不要太高
-  const isCoarsePointer = window.matchMedia?.("(pointer:coarse)")?.matches ?? false;
-  const rmsDelta = isCoarsePointer ? 0.03 : 0.04;
-  const avgDelta = isCoarsePointer ? 10 : 14;
+        // 设备粗略判断（手机一般 pointer:coarse）
+        const isPhoneLike = window.matchMedia?.('(pointer:coarse)')?.matches ?? false;
 
-  const hit =
-    (rms > rmsFloorRef.current + rmsDelta) ||
-    (avg > avgFloorRef.current + avgDelta) ||
-    (lowAvg > avgFloorRef.current + avgDelta);
+        // ✅ 关键：保留你原本“电脑可用”的触发方式（不让电脑变难）
+        const desktopLegacyHit = average > 75;
 
-  // 防抖：手机需要更少帧
-  const requiredFrames = isCoarsePointer ? 3 : 3;
-  const cooldownMs = 500;
+        // ✅ 新增：手机/降噪环境更容易触发（相对更宽松）
+        const rmsHit = rms > (isPhoneLike ? 0.03 : 0.04);
+        const lowHit = lowAvg > (isPhoneLike ? 50 : 60);
+        const avgHit = average > (isPhoneLike ? 55 : 65);
 
-  if (hit) blowHitFramesRef.current += 1;
-  else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
+        const hit = desktopLegacyHit || rmsHit || lowHit || avgHit;
 
-  const canTrigger = now - lastTriggerAtRef.current > cooldownMs;
-  const shouldTrigger = blowHitFramesRef.current >= requiredFrames;
+        // 防抖 + 冷却：电脑保持“几乎立即”，手机也容易触发
+        const requiredFrames = desktopLegacyHit ? 1 : isPhoneLike ? 2 : 2;
+        const cooldownMs = 350;
 
-  // ✅ 调试 HUD（你马上能看到有没有声音输入）
-  setDebugAudio({
-    rms,
-    avg,
-    low: lowAvg,
-    ctx: audioCtxRef.current?.state ?? "unknown",
-  });
+        if (hit) blowHitFramesRef.current += 1;
+        else blowHitFramesRef.current = Math.max(0, blowHitFramesRef.current - 1);
 
-  if (canTrigger && shouldTrigger) {
-    if (state === "LISTENING") {
-      setState("COUNTDOWN");
-      lastStateTimeRef.current = now;
-      lastTriggerAtRef.current = now;
-      blowHitFramesRef.current = 0;
-    } else if (state === "CANDLES_LIT") {
-      setState("BLOW_OUT");
-      lastStateTimeRef.current = now;
-      lastTriggerAtRef.current = now;
-      blowHitFramesRef.current = 0;
-    }
-  }
-}
+        const canTrigger = now - lastTriggerAtRef.current > cooldownMs;
+        const shouldTrigger = blowHitFramesRef.current >= requiredFrames;
 
+        if (canTrigger && shouldTrigger) {
+          if (state === 'LISTENING') {
+            setState('COUNTDOWN');
+            lastStateTimeRef.current = now;
+            lastTriggerAtRef.current = now;
+            blowHitFramesRef.current = 0;
+          } else if (state === 'CANDLES_LIT') {
+            setState('BLOW_OUT');
+            lastStateTimeRef.current = now;
+            lastTriggerAtRef.current = now;
+            blowHitFramesRef.current = 0;
+          }
+        }
+      }
 
       fsmTimerRef.current = requestAnimationFrame(update);
     };
@@ -391,16 +349,20 @@ if (analyserRef.current && micActive) {
       author: 'LOCAL_FALLBACK',
     };
 
+    // 1) 先读缓存
     const cached = localStorage.getItem(GREETING_CACHE_KEY);
     if (cached) {
       try {
         const parsed = JSON.parse(cached);
+
+        // ✅ 校验结构
         if (parsed && typeof parsed.message === 'string' && typeof parsed.author === 'string') {
           setGreeting(parsed);
         } else {
           localStorage.removeItem(GREETING_CACHE_KEY);
           setGreeting(fallback);
         }
+
         initMic();
         return;
       } catch {
@@ -411,6 +373,7 @@ if (analyserRef.current && micActive) {
       }
     }
 
+    // 2) 没缓存 → 调 Gemini 一次
     try {
       const result = await generateLuxuryGreeting(subjectName);
 
@@ -445,7 +408,7 @@ if (analyserRef.current && micActive) {
         className={`fixed inset-0 bg-white z-[9999] pointer-events-none transition-opacity duration-150 ${
           showFlash ? 'opacity-100' : 'opacity-0'
         }`}
-      />
+      ></div>
 
       <div
         className="absolute inset-0 opacity-10 pointer-events-none"
@@ -454,14 +417,14 @@ if (analyserRef.current && micActive) {
             'linear-gradient(#ca8a04 1px, transparent 1px), linear-gradient(90deg, #ca8a04 1px, transparent 1px)',
           backgroundSize: '100px 100px',
         }}
-      />
+      ></div>
 
       <Canvas shadows dpr={[1, 2]} gl={{ preserveDrawingBuffer: true, antialias: true }}>
         <PerspectiveCamera makeDefault position={[0, 1, 12]} fov={35} />
         <OrbitControls
           enablePan={false}
           enableZoom={false}
-          autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GIFT_OPEN'}
+          autoRotate={state === 'IDLE' || state === 'LISTENING' || state === 'GREETING' || state === 'GIFT_OPEN'}
           autoRotateSpeed={0.35}
         />
 
@@ -502,11 +465,8 @@ if (analyserRef.current && micActive) {
             <h1 className="text-[10px] tracking-[0.8em] uppercase text-yellow-500/60 mb-1">
               AETHELGARD CORE v3.1
             </h1>
-            <p className="text-white/20 text-[8px] tracking-[0.3em]">
-              SYNCHRONIZING BIO-METRIC... STATUS: STABLE
-            </p>
+            <p className="text-white/20 text-[8px] tracking-[0.3em]">SYNCHRONIZING BIO-METRIC... STATUS: STABLE</p>
           </div>
-
           <div className="text-right">
             <div className="flex flex-col items-end gap-3 pointer-events-auto">
               {state === 'GIFT_OPEN' && (
@@ -535,7 +495,6 @@ if (analyserRef.current && micActive) {
                       <circle cx="12" cy="13" r="4" />
                     </svg>
                   </button>
-
                   <button
                     onClick={() => setIsMailOpen(!isMailOpen)}
                     className={`w-12 h-12 border border-yellow-500/30 flex items-center justify-center transition-all bg-black/40 ${
@@ -560,7 +519,6 @@ if (analyserRef.current && micActive) {
                       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
                     </svg>
                   </button>
-
                   <button
                     onClick={() => setIsArchiveOpen(!isArchiveOpen)}
                     className={`w-12 h-12 border border-yellow-500/30 flex items-center justify-center transition-all bg-black/40 ${
@@ -597,7 +555,7 @@ if (analyserRef.current && micActive) {
           {state === 'IDLE' && (
             <div className="pointer-events-auto flex flex-col items-center animate-in fade-in zoom-in duration-1000">
               <div className="relative mb-8">
-                <div className="absolute -inset-4 border border-yellow-500/20 rounded-full animate-spin-slow" />
+                <div className="absolute -inset-4 border border-yellow-500/20 rounded-full animate-spin-slow"></div>
                 <div className="w-24 h-24 bg-yellow-500/10 backdrop-blur-3xl border border-yellow-500/40 rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(202,138,4,0.1)]">
                   <div className="text-yellow-500 text-3xl font-luxury">17</div>
                 </div>
@@ -611,14 +569,12 @@ if (analyserRef.current && micActive) {
                 onClick={handleInitialize}
                 className="group relative px-12 py-5 overflow-hidden rounded-sm transition-all bg-transparent border border-yellow-500/50"
               >
-                <div className="absolute inset-0 bg-yellow-500/10 group-hover:bg-yellow-500/20 transition-colors" />
-                <div className="relative text-yellow-500 tracking-[0.5em] uppercase text-sm font-bold">
-                  启动庆典系统
-                </div>
-                <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-yellow-500" />
-                <div className="absolute top-0 right-0 w-2 h-2 border-t border-r border-yellow-500" />
-                <div className="absolute bottom-0 left-0 w-2 h-2 border-b border-l border-yellow-500" />
-                <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-yellow-500" />
+                <div className="absolute inset-0 bg-yellow-500/10 group-hover:bg-yellow-500/20 transition-colors"></div>
+                <div className="relative text-yellow-500 tracking-[0.5em] uppercase text-sm font-bold">启动庆典系统</div>
+                <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-yellow-500"></div>
+                <div className="absolute top-0 right-0 w-2 h-2 border-t border-r border-yellow-500"></div>
+                <div className="absolute bottom-0 left-0 w-2 h-2 border-b border-l border-yellow-500"></div>
+                <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-yellow-500"></div>
               </button>
             </div>
           )}
@@ -627,26 +583,20 @@ if (analyserRef.current && micActive) {
             <div className="animate-in fade-in duration-1000">
               <div className="flex justify-center mb-8 relative">
                 <div className="absolute inset-0 flex items-center justify-center opacity-20">
-                  <div className="w-40 h-40 border border-yellow-500 rounded-full animate-ping" />
+                  <div className="w-40 h-40 border border-yellow-500 rounded-full animate-ping"></div>
                 </div>
                 <div className="w-16 h-16 border-2 border-yellow-500 rounded-full flex items-center justify-center">
-                  <div className="w-6 h-6 bg-yellow-500 rounded-full shadow-[0_0_30px_#ca8a04]" />
+                  <div className="w-6 h-6 bg-yellow-500 rounded-full shadow-[0_0_30px_#ca8a04]"></div>
                 </div>
               </div>
-              <p className="text-yellow-500/60 uppercase tracking-[0.8em] text-[10px] mb-4">
-                等待音频冲击信号
-              </p>
-              <h2 className="text-white text-2xl font-light tracking-[0.4em] mb-2 uppercase">
-                对着麦克风吹气以激发星云
-              </h2>
+              <p className="text-yellow-500/60 uppercase tracking-[0.8em] text-[10px] mb-4">等待音频冲击信号</p>
+              <h2 className="text-white text-2xl font-light tracking-[0.4em] mb-2 uppercase">对着麦克风吹气以激发星云</h2>
             </div>
           )}
 
           {state === 'COUNTDOWN' && (
             <div className="space-y-6">
-              <p className="text-yellow-500 uppercase tracking-[1em] text-[12px] opacity-60">
-                星云结构压缩中
-              </p>
+              <p className="text-yellow-500 uppercase tracking-[1em] text-[12px] opacity-60">星云结构压缩中</p>
               <div className="text-[10rem] leading-none text-white font-pixel opacity-80 animate-pulse drop-shadow-[0_0_20px_white]">
                 {Math.ceil(3 * (1 - progress))}
               </div>
@@ -680,12 +630,12 @@ if (analyserRef.current && micActive) {
           {state === 'GIFT_OPEN' && greeting && isMailOpen && (
             <div className="animate-in fade-in slide-in-from-bottom-20 duration-1000 space-y-6 max-w-2xl mx-auto pointer-events-auto">
               <div className="relative p-10 bg-black/90 backdrop-blur-3xl border border-yellow-500/20 text-left overflow-y-auto max-h-[75vh] shadow-[0_0_100px_rgba(0,0,0,0.8)]">
-                <div className="absolute top-0 right-0 w-24 h-24 border-t border-r border-yellow-500/20 pointer-events-none" />
-                <div className="absolute bottom-0 left-0 w-24 h-24 border-b border-l border-yellow-500/20 pointer-events-none" />
+                <div className="absolute top-0 right-0 w-24 h-24 border-t border-r border-yellow-500/20 pointer-events-none"></div>
+                <div className="absolute bottom-0 left-0 w-24 h-24 border-b border-l border-yellow-500/20 pointer-events-none"></div>
 
                 <div className="flex items-center justify-between gap-4 mb-8 border-b border-yellow-500/10 pb-6">
                   <div className="flex items-center gap-3">
-                    <div className="w-2.5 h-2.5 bg-yellow-500 animate-pulse shadow-[0_0_10px_#ca8a04]" />
+                    <div className="w-2.5 h-2.5 bg-yellow-500 animate-pulse shadow-[0_0_10px_#ca8a04]"></div>
                     <p className="text-yellow-500 uppercase tracking-[0.4em] text-[10px] font-bold font-mono">
                       MESSAGE_ENCODED // PROTOCOL_17
                     </p>
@@ -697,7 +647,6 @@ if (analyserRef.current && micActive) {
                   <div className="text-yellow-500/50 text-[10px] mb-2 uppercase tracking-tighter font-bold underline decoration-yellow-500/20 underline-offset-4 font-mono">
                     [ADDR: CORE_ZJB]
                   </div>
-
                   <div className="bg-white/5 p-4 border-l-2 border-yellow-500/40">
                     <TypewriterText text={fixedMessage} delay={25} />
                   </div>
